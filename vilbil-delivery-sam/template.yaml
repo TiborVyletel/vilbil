@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Vilbil Serverless application
+
+Parameters:
+  Stage:
+    Type: String
+    Default: prod
+
+Globals:
+  Function:
+    Handler: vilbil.application.aws.lambda.StreamLambdaHandler::handleRequest
+    CodeUri: "../vilbil-application/target/vilbil-application-1.0.0-SNAPSHOT.jar"
+    Runtime: java21
+    Timeout: 120
+    MemorySize: 512
+    SnapStart:
+      ApplyOn: PublishedVersions      
+    Environment:
+      Variables:
+        JAVA_TOOL_OPTIONS: "-XX:+TieredCompilation -XX:TieredStopAtLevel=1"
+        PRODUCT_TABLE_NAME: !Ref BillsTable
+
+Resources:
+  VilbilApi:
+    Type: AWS::Serverless::Api
+    DependsOn: VilbilCWLRoleArn
+    Properties:
+      StageName: !Ref Stage
+      Name: VirtualBillPublicAPI
+      Description: Serverless API for Virtual Bills
+      OpenApiVersion: 3.0.1
+      AccessLogSetting:
+        DestinationArn: !Sub ${VilbilApiLogGroup.Arn} # This Log Group is already created within our SAM Template
+        Format: "{'integrationLatency':'$context.integrationLatency', 'latency':'$context.responseLatency', 'requestId':'$context.requestId', 'ip': '$context.identity.sourceIp', 'caller':'$context.identity.caller', 'user':'$context.identity.user','requestTime':'$context.requestTime', 'xrayTraceId':'$context.xrayTraceId', 'wafResponseCode':'$context.wafResponseCode', 'httpMethod':'$context.httpMethod','resourcePath':'$context.resourcePath', 'status':'$context.status','protocol':'$context.protocol', 'responseLength':'$context.responseLength' }"
+      #MethodSettings:
+       # - MetricsEnabled: True
+       #   ResourcePath: '/*'
+       #   HttpMethod: '*'
+      Auth:
+        ApiKeyRequired: false # true  # sets for all methods
+
+
+  VilbilCWLRoleArn:
+   Type: AWS::ApiGateway::Account
+   Properties: 
+      CloudWatchRoleArn: !GetAtt CloudWatchRole.Arn
+      
+  # IAM Role for API Gateway + CloudWatch Logs
+  CloudWatchRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+        Path: /
+        ManagedPolicyArns:
+          - 'arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs'         
+        
+  VilbilApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+       LogGroupName: !Sub "/aws/apigateway/${VilbilApi}"
+       RetentionInDays: 3
+
+#  VilbilApiStage:
+#    Type: AWS::ApiGateway::Stage
+#    Properties:
+#      StageName: !Ref Stage
+#      RestApiId: !Ref VilbilApi
+
+  VilbilApiUsagePlan:
+     Type: AWS::ApiGateway::UsagePlan
+     DependsOn:  
+        - VilbilApiStage
+     Properties:
+      ApiStages: 
+        - ApiId: !Ref VilbilApi
+          Stage: !Ref Stage
+      UsagePlanName: VilbilAPIUsagePlan
+      Description: Usage plan for Vilbil API
+      Quota:
+          Limit: 2000
+          Period: DAY
+      Throttle:
+          RateLimit:  1000
+          BurstLimit: 5000
+
+  VilbilApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn:  
+       - VilbilApiStage
+    Properties: 
+      Name: "VilbilApiKey"
+      Description: "Vilbil API Key"
+      Enabled: true
+      GenerateDistinctId: false
+      Value: a6ZbcDefQW12BN56WEI2
+      StageKeys:
+        - RestApiId: !Ref VilbilApi
+          StageName: !Ref Stage
+
+  VilbilUsagePlanKey:
+      Type: "AWS::ApiGateway::UsagePlanKey"
+      DependsOn: 
+      - VilbilApi
+      Properties:
+        KeyId: !Ref VilbilApiKey
+        KeyType: API_KEY
+        UsagePlanId: !Ref VilbilApiUsagePlan
+
+  AdminUiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: AdminUiFunction
+      Events:
+        GetRequest:
+          Type: Api
+          Properties:
+            RestApiId: !Ref VilbilApi
+            Path: /admin/{all+}
+            Method: ANY
+
+  AdminUiFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AdminUiFunction}"
+      RetentionInDays: 3
+
+  CreateBillFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: CreateBillFunction
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BillsTable
+      Events:
+        PutRequest:
+          Type: Api
+          Properties:
+            RestApiId: !Ref VilbilApi
+            Path: /bills
+            Method: post
+
+  CreateBillFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${CreateBillFunction}"
+      RetentionInDays: 3
+
+  BillsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "VilbilBillsTable"
+      PointInTimeRecoverySpecification:
+         PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: 'PK'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'PK'
+          KeyType: 'HASH'
+      BillingMode: PAY_PER_REQUEST    
+      #ProvisionedThroughput: 
+        #ReadCapacityUnits: "1"
+        #WriteCapacityUnits: "1"
+
+Outputs:
+  VilbilApiEndpoint:
+    Description: "API Gateway endpoint URL for Prod stage for Vilbil Serverless Application"
+    Value: !Sub "https://${VilbilApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/bills"

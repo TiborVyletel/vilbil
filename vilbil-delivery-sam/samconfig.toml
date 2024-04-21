@@ -1,0 +1,10 @@
+version = 0.1
+[default.deploy.parameters]
+stack_name = "vilbil-app"
+resolve_s3 = true
+s3_prefix = "vilbil-app"
+region = "eu-central-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Stage=\"prod\" ApplicationBundle=\"vilbil-application-1.0.0-SNAPSHOT.jar\""
+image_repositories = []
